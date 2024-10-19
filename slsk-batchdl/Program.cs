@@ -1,4 +1,4 @@
-﻿using AngleSharp.Text;
+using AngleSharp.Text;
 using Soulseek;
 using System.Collections.Concurrent;
 using System.Data;
@@ -490,95 +490,144 @@ static partial class Program
 
 
     static async Task DownloadAlbum(TrackListEntry tle)
+{
+    var organizer = new FileManager(tle);
+    List<Track>? tracks = null;
+    var retrievedFolders = new HashSet<string>();
+    bool succeeded = false;
+    string? soulseekDir = null;
+
+    while (tle.list.Count > 0 && !Config.I.albumArtOnly)
     {
-        var organizer = new FileManager(tle);
-        List<Track>? tracks = null;
-        var retrievedFolders = new HashSet<string>();
-        bool succeeded = false;
-        string? soulseekDir = null;
+        int index = 0;
+        List<int> selectedIndices = new List<int>(); // Initialize as empty.
+        bool wasInteractive = Config.I.interactiveMode;
 
-        while (tle.list.Count > 0 && !Config.I.albumArtOnly)
-        {
-            int index = 0;
-            bool wasInteractive = Config.I.interactiveMode;
+        bool isSpecificSelection = false; // Track if specific tracks were selected
 
-            if (Config.I.interactiveMode)
-            {
-                index = await InteractiveModeAlbum(tle.list, !Config.I.noBrowseFolder, retrievedFolders);
-                if (index == -1) break;
-            }
+if (Config.I.interactiveMode)
+{
+    // Correct way to retrieve and destructure the tuple from InteractiveModeAlbum
+    (int albumIndex, List<int> userSelectedIndices) = await InteractiveModeAlbum(tle.list, !Config.I.noBrowseFolder, retrievedFolders);
 
-            tracks = tle.list[index];
+    // Assign the components of the tuple to their respective variables
+    index = albumIndex;
+    selectedIndices = userSelectedIndices;
 
-            soulseekDir = Utils.GreatestCommonDirectorySlsk(tracks.Select(t => t.FirstDownload.Filename));
+    // If the returned index is -1, it indicates we need to exit this loop
+    if (index == -1) 
+        break;
 
-            organizer.SetRemoteCommonDir(soulseekDir);
+    // Check if the user has selected specific tracks (flagged with a special bit)
+    isSpecificSelection = (index & (1 << 30)) != 0;
+    index &= ~(1 << 30); // Remove the flag to get the actual album index
 
-            if (!Config.I.interactiveMode && !wasInteractive)
-            {
-                Console.WriteLine();
-                PrintAlbum(tracks);
-            }
-
-            var semaphore = new SemaphoreSlim(999); // Needs to be uncapped due to a bug that causes album downloads to fail after some time
-            using var cts = new CancellationTokenSource();
-
-            try
-            {
-                await RunAlbumDownloads(tle, organizer, tracks, semaphore, cts);
-
-                if (!Config.I.noBrowseFolder && !retrievedFolders.Contains(soulseekDir))
-                {
-                    Console.WriteLine("Getting all files in folder...");
-
-                    int newFilesFound = await Search.CompleteFolder(tracks, tracks[0].FirstResponse, soulseekDir);
-                    retrievedFolders.Add(tracks[0].FirstUsername + '\\' + soulseekDir);
-
-                    if (newFilesFound > 0)
-                    {
-                        Console.WriteLine($"Found {newFilesFound} more files in the directory, downloading:");
-                        await RunAlbumDownloads(tle, organizer, tracks, semaphore, cts);
-                    }
-                    else
-                    {
-                        Console.WriteLine("No more files found.");
-                    }
-                }
-
-                succeeded = true;
-                break;
-            }
-            catch (OperationCanceledException)
-            {
-                OnAlbumFail(tracks);
-            }
-
-            organizer.SetRemoteCommonDir(null);
-            tle.list.RemoveAt(index);
-        }
-
-        if (succeeded)
-        {
-            await OnAlbumSuccess(tle, tracks);
-        }
-
-        List<Track>? additionalImages = null;
-        
-        if (Config.I.albumArtOnly || succeeded && Config.I.albumArtOption != AlbumArtOption.Default)
-        {
-            Console.WriteLine($"\nDownloading additional images:");
-            additionalImages = await DownloadImages(tle, tle.list, Config.I.albumArtOption, tracks);
-            tracks?.AddRange(additionalImages);
-        }
-
-        if (tracks != null && tle.source.DownloadPath.Length > 0)
-        {
-            organizer.OrganizeAlbum(tracks, additionalImages);
-        }
-
-        indexEditor.Update();
-        playlistEditor.Update();
+    // Validate the album index to make sure it's within bounds
+    if (index < 0 || index >= tle.list.Count)
+    {
+        Console.WriteLine("Invalid album index detected, skipping album.");
+        continue;
     }
+
+    // Handle case where specific tracks were selected
+    if (isSpecificSelection && selectedIndices.Any())
+    {
+        // Validate that all selected indices are within the valid track list range
+        if (selectedIndices.Any(i => i < 0 || i >= tle.list[index].Count))
+        {
+            Console.WriteLine("One or more selected track indices are out of range, skipping album.");
+            continue;
+        }
+
+        // Create a filtered list of tracks based on the user's selection
+        tracks = selectedIndices.Select(i => tle.list[index][i]).ToList();
+        Console.WriteLine($"Downloading specific tracks: {string.Join(", ", selectedIndices.Select(i => i + 1))}");
+    }
+    else
+    {
+        // Default behavior: download the entire album
+        tracks = tle.list[index];
+    }
+}
+else
+{
+    // Non-interactive mode, simply take the current album as a whole
+    tracks = tle.list[index];
+}
+
+
+        // Continue with the download process...
+        soulseekDir = Utils.GreatestCommonDirectorySlsk(tracks.Select(t => t.FirstDownload.Filename));
+        organizer.SetRemoteCommonDir(soulseekDir);
+
+        if (!Config.I.interactiveMode && !wasInteractive)
+        {
+            Console.WriteLine();
+            PrintAlbum(tracks);
+        }
+
+        var semaphore = new SemaphoreSlim(999); // Needs to be uncapped due to a bug that causes album downloads to fail after some time
+        using var cts = new CancellationTokenSource();
+
+        try
+        {
+            await RunAlbumDownloads(tle, organizer, tracks, semaphore, cts);
+
+            if (!Config.I.noBrowseFolder && !retrievedFolders.Contains(soulseekDir) && !isSpecificSelection)
+{
+    Console.WriteLine("Getting all files in folder...");
+
+    int newFilesFound = await Search.CompleteFolder(tracks, tracks[0].FirstResponse, soulseekDir);
+    retrievedFolders.Add(tracks[0].FirstUsername + '\\' + soulseekDir);
+
+    if (newFilesFound > 0)
+    {
+        Console.WriteLine($"Found {newFilesFound} more files in the directory, downloading:");
+        await RunAlbumDownloads(tle, organizer, tracks, semaphore, cts);
+    }
+    else
+    {
+        Console.WriteLine("No more files found.");
+    }
+}
+
+
+            succeeded = true;
+            break;
+        }
+        catch (OperationCanceledException)
+        {
+            OnAlbumFail(tracks);
+        }
+
+        organizer.SetRemoteCommonDir(null);
+        tle.list.RemoveAt(index);
+    }
+
+    if (succeeded)
+    {
+        await OnAlbumSuccess(tle, tracks);
+    }
+
+    List<Track>? additionalImages = null;
+
+    if (Config.I.albumArtOnly || succeeded && Config.I.albumArtOption != AlbumArtOption.Default)
+    {
+        Console.WriteLine($"\nDownloading additional images:");
+        additionalImages = await DownloadImages(tle, tle.list, Config.I.albumArtOption, tracks);
+        tracks?.AddRange(additionalImages);
+    }
+
+    if (tracks != null && tle.source.DownloadPath.Length > 0)
+    {
+        organizer.OrganizeAlbum(tracks, additionalImages);
+    }
+
+    indexEditor.Update();
+    playlistEditor.Update();
+}
+
+
 
 
     static async Task RunAlbumDownloads(TrackListEntry tle, FileManager organizer, List<Track> tracks, SemaphoreSlim semaphore, CancellationTokenSource cts)
@@ -645,129 +694,132 @@ static partial class Program
 
 
     static async Task<List<Track>> DownloadImages(TrackListEntry tle, List<List<Track>> downloads, AlbumArtOption option, List<Track>? chosenAlbum)
-    {
-        var downloadedImages = new List<Track>();
-        long mSize = 0;
-        int mCount = 0;
+{
+    var downloadedImages = new List<Track>();
+    long mSize = 0;
+    int mCount = 0;
 
-        var fileManager = new FileManager(tle);
+    var fileManager = new FileManager(tle);
+
+    if (chosenAlbum != null)
+    {
+        string dir = Utils.GreatestCommonDirectorySlsk(chosenAlbum.Select(t => t.FirstDownload.Filename));
+        fileManager.SetDefaultFolderName(Path.GetFileName(Utils.NormalizedPath(dir))); 
+    }
+
+    if (option == AlbumArtOption.Default)
+        return downloadedImages;
+
+    int[]? sortedLengths = null;
+
+    if (chosenAlbum != null && chosenAlbum.Any(t => !t.IsNotAudio))
+        sortedLengths = chosenAlbum.Where(t => !t.IsNotAudio).Select(t => t.Length).OrderBy(x => x).ToArray();
+
+    var albumArts = downloads
+        .Where(ls => chosenAlbum == null || Search.AlbumsAreSimilar(chosenAlbum, ls, sortedLengths))
+        .Select(ls => ls.Where(t => Utils.IsImageFile(t.FirstDownload.Filename)))
+        .Where(ls => ls.Any());
+
+    if (!albumArts.Any())
+    {
+        Console.WriteLine("No images found");
+        return downloadedImages;
+    }
+
+    if (option == AlbumArtOption.Largest)
+    {
+        albumArts = albumArts
+            .OrderByDescending(tracks => tracks.Select(t => t.FirstDownload.Size).Max() / 1024 / 100)
+            .ThenByDescending(tracks => tracks.First().FirstResponse.UploadSpeed / 1024 / 300)
+            .ThenByDescending(tracks => tracks.Select(t => t.FirstDownload.Size).Sum() / 1024 / 100);
 
         if (chosenAlbum != null)
         {
-            string dir = Utils.GreatestCommonDirectorySlsk(chosenAlbum.Select(t => t.FirstDownload.Filename));
-            fileManager.SetDefaultFolderName(Path.GetFileName(Utils.NormalizedPath(dir))); 
+            mSize = chosenAlbum
+                .Where(t => t.State == TrackState.Downloaded && Utils.IsImageFile(t.DownloadPath))
+                .Select(t => t.FirstDownload.Size)
+                .DefaultIfEmpty(0)
+                .Max();
         }
-
-        if (option == AlbumArtOption.Default)
-            return downloadedImages;
-
-        int[]? sortedLengths = null;
-
-        if (chosenAlbum != null && chosenAlbum.Any(t => !t.IsNotAudio))
-            sortedLengths = chosenAlbum.Where(t => !t.IsNotAudio).Select(t => t.Length).OrderBy(x => x).ToArray();
-
-        var albumArts = downloads
-            .Where(ls => chosenAlbum == null || Search.AlbumsAreSimilar(chosenAlbum, ls, sortedLengths))
-            .Select(ls => ls.Where(t => Utils.IsImageFile(t.FirstDownload.Filename)))
-            .Where(ls => ls.Any());
-
-        if (!albumArts.Any())
-        {
-            Console.WriteLine("No images found");
-            return downloadedImages;
-        }
-
-        if (option == AlbumArtOption.Largest)
-        {
-            albumArts = albumArts
-                .OrderByDescending(tracks => tracks.Select(t => t.FirstDownload.Size).Max() / 1024 / 100)
-                .ThenByDescending(tracks => tracks.First().FirstResponse.UploadSpeed / 1024 / 300)
-                .ThenByDescending(tracks => tracks.Select(t => t.FirstDownload.Size).Sum() / 1024 / 100);
-
-            if (chosenAlbum != null)
-            {
-                mSize = chosenAlbum
-                    .Where(t => t.State == TrackState.Downloaded && Utils.IsImageFile(t.DownloadPath))
-                    .Select(t => t.FirstDownload.Size)
-                    .DefaultIfEmpty(0)
-                    .Max();
-            }
-        }
-        else if (option == AlbumArtOption.Most)
-        {
-            albumArts = albumArts
-                .OrderByDescending(tracks => tracks.Count())
-                .ThenByDescending(tracks => tracks.First().FirstResponse.UploadSpeed / 1024 / 300)
-                .ThenByDescending(tracks => tracks.Select(t => t.FirstDownload.Size).Sum() / 1024 / 100);
-
-            if (chosenAlbum != null)
-            {
-                mCount = chosenAlbum
-                    .Count(t => t.State == TrackState.Downloaded && Utils.IsImageFile(t.DownloadPath));
-            }
-        }
-
-        var albumArtLists = albumArts.Select(ls => ls.ToList()).ToList();
-
-        bool needImageDownload(List<Track> list)
-        {
-            if (list.All(t => t.State == TrackState.Downloaded || t.State == TrackState.AlreadyExists))
-                return false;
-            else if (option == AlbumArtOption.Most)
-                return mCount < list.Count;
-            else if (option == AlbumArtOption.Largest)
-                return mSize < list.Max(t => t.FirstDownload.Size) - 1024 * 50;
-            return true;
-        }
-
-        while (albumArtLists.Count > 0)
-        {
-            int index = 0;
-            bool wasInteractive = Config.I.interactiveMode;
-
-            if (Config.I.interactiveMode)
-            {
-                index = await InteractiveModeAlbum(albumArtLists, false, null);
-                if (index == -1) break;
-            }
-
-            var tracks = albumArtLists[index];
-            albumArtLists.RemoveAt(index);
-
-            if (!needImageDownload(tracks))
-            {
-                Console.WriteLine("Image requirements already satisfied.");
-                return downloadedImages;
-            }
-
-            if (!Config.I.interactiveMode && !wasInteractive)
-            {
-                Console.WriteLine();
-                PrintAlbum(tracks);
-            }
-
-            fileManager.SetRemoteCommonDir(Utils.GreatestCommonDirectorySlsk(tracks.Select(t => t.FirstDownload.Filename)));
-
-            bool allSucceeded = true;
-            var semaphore = new SemaphoreSlim(1);
-
-            foreach (var track in tracks)
-            {
-                using var cts = new CancellationTokenSource();
-                await DownloadTask(null, track, semaphore, fileManager, cts, false, false, false);
-
-                if (track.State == TrackState.Downloaded)
-                    downloadedImages.Add(track);
-                else
-                    allSucceeded = false;
-            }
-
-            if (allSucceeded)
-                break;
-        }
-
-        return downloadedImages;
     }
+    else if (option == AlbumArtOption.Most)
+    {
+        albumArts = albumArts
+            .OrderByDescending(tracks => tracks.Count())
+            .ThenByDescending(tracks => tracks.First().FirstResponse.UploadSpeed / 1024 / 300)
+            .ThenByDescending(tracks => tracks.Select(t => t.FirstDownload.Size).Sum() / 1024 / 100);
+
+        if (chosenAlbum != null)
+        {
+            mCount = chosenAlbum
+                .Count(t => t.State == TrackState.Downloaded && Utils.IsImageFile(t.DownloadPath));
+        }
+    }
+
+    var albumArtLists = albumArts.Select(ls => ls.ToList()).ToList();
+
+    bool NeedImageDownload(List<Track> tracks)
+    {
+        if (tracks.All(t => t.State == TrackState.Downloaded || t.State == TrackState.AlreadyExists))
+            return false;
+        if (option == AlbumArtOption.Most)
+            return mCount < tracks.Count;
+        if (option == AlbumArtOption.Largest)
+            return mSize < tracks.Max(t => t.FirstDownload.Size) - 1024 * 50;
+        return true;
+    }
+
+    while (albumArtLists.Count > 0)
+    {
+        int index = 0;
+        bool wasInteractive = Config.I.interactiveMode;
+
+        if (Config.I.interactiveMode)
+        {
+            // Destructure tuple to get albumIndex and ignore selectedIndices
+            var (albumIndex, _) = await InteractiveModeAlbum(albumArtLists, false, null);
+            index = albumIndex;
+            if (index == -1) break;
+        }
+
+        var tracks = albumArtLists[index];
+        albumArtLists.RemoveAt(index);
+
+        if (!NeedImageDownload(tracks))
+        {
+            Console.WriteLine("Image requirements already satisfied.");
+            continue; // Continue to check other album art lists
+        }
+
+        if (!Config.I.interactiveMode && !wasInteractive)
+        {
+            Console.WriteLine();
+            PrintAlbum(tracks);
+        }
+
+        fileManager.SetRemoteCommonDir(Utils.GreatestCommonDirectorySlsk(tracks.Select(t => t.FirstDownload.Filename)));
+
+        bool allSucceeded = true;
+        var semaphore = new SemaphoreSlim(1);
+
+        foreach (var track in tracks)
+        {
+            using var cts = new CancellationTokenSource();
+            await DownloadTask(null, track, semaphore, fileManager, cts, false, false, false);
+
+            if (track.State == TrackState.Downloaded)
+                downloadedImages.Add(track);
+            else
+                allSucceeded = false;
+        }
+
+        if (allSucceeded)
+            break;
+    }
+
+    return downloadedImages;
+}
+
 
 
     static async Task DownloadTask(TrackListEntry? tle, Track track, SemaphoreSlim semaphore, FileManager organizer, CancellationTokenSource? cts, bool cancelOnFail, bool removeFromSource, bool organize)
@@ -866,89 +918,110 @@ static partial class Program
     }
 
 
-    static async Task<int> InteractiveModeAlbum(List<List<Track>> list, bool retrieveFolder, HashSet<string>? retrievedFolders)
+    static async Task<(int albumIndex, List<int> selectedIndices)> InteractiveModeAlbum(List<List<Track>> list, bool retrieveFolder, HashSet<string>? retrievedFolders)
+{
+    int aidx = 0;
+    List<int> selectedIndices = new List<int>(); // Initialize as empty
+
+    // Helper function to get user input
+    static string interactiveModeLoop()
     {
-        int aidx = 0;
-        static string interactiveModeLoop()
-        {
-            string userInput = "";
-            while (true)
-            {
-                var key = Console.ReadKey(false);
-                if (key.Key == ConsoleKey.DownArrow)
-                    return "n";
-                else if (key.Key == ConsoleKey.UpArrow)
-                    return "p";
-                else if (key.Key == ConsoleKey.Escape)
-                    return "s";
-                else if (key.Key == ConsoleKey.Enter)
-                    return userInput;
-                else if (char.IsControl(key.KeyChar))
-                    continue;
-                else
-                    userInput += key.KeyChar;
-            }
-        }
-
-        string retrieveAll1 = retrieveFolder ? "| [r]            " : "";
-        string retrieveAll2 = retrieveFolder ? "| Load All Files " : "";
-
-        Console.WriteLine();
-        WriteLine($" [Up/p] | [Down/n] | [Enter] | [q]                       {retrieveAll1}| [Esc/s]", ConsoleColor.Green);
-        WriteLine($" Prev   | Next     | Accept  | Accept & Quit Interactive {retrieveAll2}| Skip", ConsoleColor.Green);
-        Console.WriteLine();
-
+        string userInput = "";
         while (true)
         {
-            var tracks = list[aidx];
-            var response = tracks[0].FirstResponse;
-            var username = tracks[0].FirstUsername;
-
-            WriteLine($"[{aidx + 1} / {list.Count}]", ConsoleColor.DarkGray);
-
-            PrintAlbum(tracks);
-            Console.WriteLine();
-
-        Loop:
-            string userInput = interactiveModeLoop().Trim().ToLower();
-            switch (userInput)
-            {
-                case "p":
-                    aidx = (aidx + list.Count - 1) % list.Count;
-                    break;
-                case "n":
-                    aidx = (aidx + 1) % list.Count;
-                    break;
-                case "s":
-                    return -1;
-                case "q":
-                    Config.I.interactiveMode = false;
-                    return aidx;
-                case "r":
-                    if (!retrieveFolder)
-                        break;
-                    var folder = Utils.GreatestCommonDirectorySlsk(tracks.Select(t => t.FirstDownload.Filename));
-                    if (retrieveFolder && !retrievedFolders.Contains(username + '\\' + folder))
-                    {
-                        Console.WriteLine("Getting all files in folder...");
-                        int newFiles = await Search.CompleteFolder(tracks, response, folder);
-                        retrievedFolders.Add(username + '\\' + folder);
-                        if (newFiles == 0)
-                        {
-                            Console.WriteLine("No more files found.");
-                            goto Loop;
-                        }
-                        else
-                        {
-                            Console.WriteLine($"Found {newFiles} more files in the folder:");
-                        }
-                    }
-                    break;
-                case "":
-                    return aidx;
-            }
+            var key = Console.ReadKey(false);
+            if (key.Key == ConsoleKey.DownArrow)
+                return "n";
+            else if (key.Key == ConsoleKey.UpArrow)
+                return "p";
+            else if (key.Key == ConsoleKey.Escape)
+                return "s";
+            else if (key.Key == ConsoleKey.Enter)
+                return userInput;
+            else if (char.IsControl(key.KeyChar))
+                continue;
+            else
+                userInput += key.KeyChar;
         }
     }
+
+    string retrieveAll1 = retrieveFolder ? "| [r]            " : "";
+    string retrieveAll2 = retrieveFolder ? "| Load All Files " : "";
+
+    Console.WriteLine();
+    WriteLine($" [Up/p] | [Down/n] | [Enter] | [q]                       {retrieveAll1}| [Esc/s]", ConsoleColor.Green);
+    WriteLine($" Prev   | Next     | Accept  | Accept & Quit Interactive {retrieveAll2}| Skip", ConsoleColor.Green);
+    WriteLine($"Instructions: Press Enter to download the entire album, or type 'sel:1,2,3' to download specific tracks.", ConsoleColor.Cyan);
+    Console.WriteLine();
+
+    while (true)
+    {
+        var tracks = list[aidx];
+        var response = tracks[0].FirstResponse;
+        var username = tracks[0].FirstUsername;
+
+        WriteLine($"[{aidx + 1} / {list.Count}]", ConsoleColor.DarkGray);
+
+        PrintAlbum(tracks);
+        Console.WriteLine();
+
+    Loop:
+        string userInput = interactiveModeLoop().Trim().ToLower();
+
+        // Handle specific track selection
+        if (userInput.StartsWith("sel:"))
+        {
+            try
+            {
+                // Parse the selected indices
+                selectedIndices = userInput
+                    .Replace("sel:", "")
+                    .Split(',')
+                    .Select(i => int.Parse(i.Trim()) - 1) // Convert to zero-based index
+                    .ToList();
+
+                // Validate indices
+                if (selectedIndices.Any(i => i < 0 || i >= tracks.Count))
+                {
+                    Console.WriteLine("Invalid index specified. Please enter indices within the available range.");
+                    selectedIndices.Clear(); // Clear since it's invalid input
+                    goto Loop;
+                }
+
+                // Return a value to indicate that specific tracks were selected
+                Console.WriteLine($"User selected specific tracks: {string.Join(",", selectedIndices)}");
+                return (aidx | (1 << 30), selectedIndices); // Add a special flag to indicate specific track selection
+            }
+            catch
+            {
+                Console.WriteLine("Invalid input format. Please use 'sel:1,2,3' format to specify tracks.");
+                selectedIndices.Clear(); // Clear since it couldn't parse properly
+                goto Loop;
+            }
+        }
+
+        // Handle navigation or other general commands
+        switch (userInput)
+        {
+            case "p":
+                aidx = (aidx + list.Count - 1) % list.Count;
+                break;
+            case "n":
+                aidx = (aidx + 1) % list.Count;
+                break;
+            case "s":
+                return (-1, selectedIndices);
+            case "q":
+                Config.I.interactiveMode = false;
+                return (aidx, selectedIndices);
+            case "":
+                return (aidx, selectedIndices); // Accept the whole album
+            default:
+                Console.WriteLine("Invalid input. Please use the options provided or type 'sel:1,2,3' to select specific tracks.");
+                goto Loop;
+        }
+    }
+}
 
 
     static async Task Update()
